@@ -1,0 +1,2 @@
+-- Bootstrap file.
+-- Main addon logic is split into Core and Runtime modules loaded from TBCXPTracker.toc.

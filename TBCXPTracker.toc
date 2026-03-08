@@ -1,0 +1,13 @@
+## Interface: 20505
+## Title: TBC XP Tracker
+## Notes: Tracks XP gained and estimates XP per hour.
+## Author: Soxori
+## Version: 1.0.1
+## SavedVariables: TBCXPTrackerDB
+
+TBCXPTracker.lua
+Core\Helpers\Constants.lua
+Core\Helpers\Formatting.lua
+Core\TBCXPTrackerCore.lua
+Runtime\Events.lua
+Runtime\SlashCommands.lua
