@@ -68,6 +68,10 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1)
         if NS.handleReputationUpdate then
             NS.handleReputationUpdate()
         end
+    elseif event == "CHAT_MSG_COMBAT_FACTION_CHANGE" then
+        if NS.handleReputationChatMessage then
+            NS.handleReputationChatMessage(arg1)
+        end
     elseif event == "PLAYER_LEVEL_UP" then
         if NS.handleXPUpdate then
             NS.handleXPUpdate()
@@ -79,6 +83,7 @@ eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_XP_UPDATE")
 eventFrame:RegisterEvent("UPDATE_FACTION")
+eventFrame:RegisterEvent("CHAT_MSG_COMBAT_FACTION_CHANGE")
 eventFrame:RegisterEvent("PLAYER_LEVEL_UP")
 eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")

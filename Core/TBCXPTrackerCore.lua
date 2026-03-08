@@ -179,6 +179,7 @@ local state = {
     paused = false,
     pauseStartedAt = 0,
     pausedTotal = 0,
+    reputationUsesChatFallback = false,
     instance = {
         current = nil,
         previous = nil,
@@ -603,6 +604,86 @@ local function getFactionReputationSnapshot()
     end
 
     return snapshot
+end
+
+local function isReputationSnapshotEmpty(snapshot)
+    if type(snapshot) ~= "table" then
+        return true
+    end
+
+    return next(snapshot) == nil
+end
+
+local function extractReputationDeltaFromMessage(message)
+    if type(message) ~= "string" or message == "" then
+        return nil, nil
+    end
+
+    local factionName, amount, bonusAmount = message:match("^Reputation with (.+) increased by (%d+) %(%+(%d+) bonus%)%.?$")
+    if factionName and amount then
+        local delta = floor(tonumber(amount) or 0) + floor(tonumber(bonusAmount) or 0)
+        if delta ~= 0 then
+            return trim(factionName), delta
+        end
+    end
+
+    factionName, amount = message:match("^Reputation with (.+) increased by (%d+)%.?$")
+    if factionName and amount then
+        local delta = floor(tonumber(amount) or 0)
+        if delta ~= 0 then
+            return trim(factionName), delta
+        end
+    end
+
+    factionName, amount = message:match("^Reputation with (.+) decreased by (%d+)%.?$")
+    if factionName and amount then
+        local delta = floor(tonumber(amount) or 0)
+        if delta ~= 0 then
+            return trim(factionName), -delta
+        end
+    end
+
+    return nil, nil
+end
+
+local function applyReputationDelta(totalDelta, deltaByFaction)
+    if floor(tonumber(totalDelta) or 0) == 0 or state.paused then
+        return
+    end
+
+    state.totalReputation = floor((tonumber(state.totalReputation) or 0) + totalDelta)
+    if type(state.sessionReputationByFaction) ~= "table" then
+        state.sessionReputationByFaction = {}
+    end
+    for factionName, delta in pairs(deltaByFaction) do
+        local current = floor(tonumber(state.sessionReputationByFaction[factionName]) or 0)
+        local updated = current + delta
+        if updated == 0 then
+            state.sessionReputationByFaction[factionName] = nil
+        else
+            state.sessionReputationByFaction[factionName] = updated
+        end
+    end
+
+    if state.instance.current then
+        state.instance.current.totalReputation = floor((tonumber(state.instance.current.totalReputation) or 0) + totalDelta)
+        if type(state.instance.current.reputationByFaction) ~= "table" then
+            state.instance.current.reputationByFaction = {}
+        end
+
+        for factionName, delta in pairs(deltaByFaction) do
+            local current = floor(tonumber(state.instance.current.reputationByFaction[factionName]) or 0)
+            local updated = current + delta
+            if updated == 0 then
+                state.instance.current.reputationByFaction[factionName] = nil
+            else
+                state.instance.current.reputationByFaction[factionName] = updated
+            end
+        end
+        persistInstanceData()
+    end
+
+    updateTexts()
 end
 
 local function isTrackableInstanceType(instanceType)
@@ -2015,6 +2096,7 @@ local function resetSession(preserveInstanceData)
     state.lastXPMax = tonumber(UnitXPMax("player")) or 0
     state.lastLevel = tonumber(UnitLevel("player")) or 0
     state.lastReputation = getFactionReputationSnapshot()
+    state.reputationUsesChatFallback = isReputationSnapshotEmpty(state.lastReputation)
     state.sessionReputationByFaction = {}
     state.history = {}
     if not preserveInstanceData then
@@ -2082,7 +2164,19 @@ local function handleXPUpdate()
 end
 
 local function handleReputationUpdate()
+    if not state.initialized then
+        return
+    end
+
     local snapshot = getFactionReputationSnapshot()
+    if isReputationSnapshotEmpty(snapshot) then
+        if isReputationSnapshotEmpty(state.lastReputation) then
+            state.reputationUsesChatFallback = true
+        end
+        return
+    end
+
+    state.reputationUsesChatFallback = false
     local previous = state.lastReputation or {}
     local totalDelta = 0
     local deltaByFaction = {}
@@ -2100,43 +2194,26 @@ local function handleReputationUpdate()
 
     state.lastReputation = snapshot
 
-    if totalDelta == 0 or state.paused then
+    if totalDelta == 0 then
         return
     end
 
-    state.totalReputation = floor((tonumber(state.totalReputation) or 0) + totalDelta)
-    if type(state.sessionReputationByFaction) ~= "table" then
-        state.sessionReputationByFaction = {}
-    end
-    for factionName, delta in pairs(deltaByFaction) do
-        local current = floor(tonumber(state.sessionReputationByFaction[factionName]) or 0)
-        local updated = current + delta
-        if updated == 0 then
-            state.sessionReputationByFaction[factionName] = nil
-        else
-            state.sessionReputationByFaction[factionName] = updated
-        end
+    applyReputationDelta(totalDelta, deltaByFaction)
+end
+
+local function handleReputationChatMessage(message)
+    if not state.initialized or not state.reputationUsesChatFallback then
+        return
     end
 
-    if state.instance.current then
-        state.instance.current.totalReputation = floor((tonumber(state.instance.current.totalReputation) or 0) + totalDelta)
-        if type(state.instance.current.reputationByFaction) ~= "table" then
-            state.instance.current.reputationByFaction = {}
-        end
-
-        for factionName, delta in pairs(deltaByFaction) do
-            local current = floor(tonumber(state.instance.current.reputationByFaction[factionName]) or 0)
-            local updated = current + delta
-            if updated == 0 then
-                state.instance.current.reputationByFaction[factionName] = nil
-            else
-                state.instance.current.reputationByFaction[factionName] = updated
-            end
-        end
-        persistInstanceData()
+    local factionName, delta = extractReputationDeltaFromMessage(message)
+    if not factionName or factionName == "" or not delta or delta == 0 then
+        return
     end
 
-    updateTexts()
+    applyReputationDelta(delta, {
+        [factionName] = delta
+    })
 end
 
 hidePanel = function()
@@ -2430,6 +2507,7 @@ NS.refreshHistoryModal = refreshHistoryModal
 
 NS.handleXPUpdate = handleXPUpdate
 NS.handleReputationUpdate = handleReputationUpdate
+NS.handleReputationChatMessage = handleReputationChatMessage
 NS.refreshInstanceContext = refreshInstanceContext
 NS.updateTexts = updateTexts
 
