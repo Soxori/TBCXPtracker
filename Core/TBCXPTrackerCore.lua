@@ -181,7 +181,8 @@ local state = {
     pausedTotal = 0,
     instance = {
         current = nil,
-        previous = nil
+        previous = nil,
+        contextRecoveryUntil = 0
     },
     historySelectionId = nil
 }
@@ -193,6 +194,7 @@ local hidePanel
 local showPanel
 local MINIMAP_BUTTON_RADIUS = 80
 local MINIMAP_DRAG_UPDATE_INTERVAL = 0.02
+local INSTANCE_CONTEXT_RECOVERY_GRACE_SECONDS = 12
 
 local function canPlayerGainXPNow()
     if type(IsXPUserDisabled) == "function" and IsXPUserDisabled() then
@@ -607,23 +609,92 @@ local function isTrackableInstanceType(instanceType)
     return instanceType == "party" or instanceType == "raid"
 end
 
-local function getInstanceContext()
-    local inInstance, instanceType = IsInInstance()
-    if not inInstance or not isTrackableInstanceType(instanceType) then
+local UI_MAP_TYPE_DUNGEON = (Enum and Enum.UIMapType and Enum.UIMapType.Dungeon) or 4
+local UI_MAP_TYPE_RAID = (Enum and Enum.UIMapType and Enum.UIMapType.Raid) or 5
+
+local function isDungeonOrRaidMap(instanceMapID)
+    local mapID = floor(tonumber(instanceMapID) or 0)
+    if mapID <= 0 then
         return nil
     end
 
-    local name = GetRealZoneText()
+    if type(C_Map) ~= "table" or type(C_Map.GetMapInfo) ~= "function" then
+        return nil
+    end
+
+    local ok, mapInfo = pcall(C_Map.GetMapInfo, mapID)
+    if not ok or type(mapInfo) ~= "table" then
+        return nil
+    end
+
+    local mapType = tonumber(mapInfo.mapType) or -1
+    return mapType == UI_MAP_TYPE_DUNGEON or mapType == UI_MAP_TYPE_RAID
+end
+
+local function isTrackableInstanceRecord(record)
+    if type(record) ~= "table" then
+        return false
+    end
+
+    if not isTrackableInstanceType(tostring(record.type or "")) then
+        return false
+    end
+
+    local mapIsTrackable = isDungeonOrRaidMap(record.mapID)
+    if mapIsTrackable == false then
+        return false
+    end
+
+    return true
+end
+
+local function getInstanceContext()
+    local inInstance = IsInInstance()
+    if not inInstance then
+        return nil
+    end
+
+    local instanceName
+    local instanceType
+    local difficultyID
+    local instanceMapID
+    if type(GetInstanceInfo) == "function" then
+        instanceName, instanceType, difficultyID, _, _, _, _, instanceMapID = GetInstanceInfo()
+    end
+
+    if not isTrackableInstanceType(instanceType) then
+        local _, fallbackType = IsInInstance()
+        instanceType = fallbackType
+    end
+    if not isTrackableInstanceType(instanceType) then
+        return nil
+    end
+
+    if difficultyID ~= nil then
+        local numericDifficultyID = tonumber(difficultyID) or 0
+        if numericDifficultyID <= 0 then
+            return nil
+        end
+    end
+
+    if instanceMapID ~= nil then
+        local mapIsTrackable = isDungeonOrRaidMap(instanceMapID)
+        if mapIsTrackable == false then
+            return nil
+        end
+    end
+
+    local name = instanceName
     if not name or name == "" then
-        local instanceName = GetInstanceInfo()
-        name = instanceName or "Unknown Instance"
+        name = GetRealZoneText() or "Unknown Instance"
     end
 
     local key = instanceType .. ":" .. name
     return {
         key = key,
         name = name,
-        type = instanceType
+        type = instanceType,
+        mapID = floor(tonumber(instanceMapID) or 0)
     }
 end
 
@@ -637,9 +708,10 @@ local function finishCurrentInstance()
         return
     end
 
+    state.instance.contextRecoveryUntil = 0
     current.endTime = getActiveTime()
     current.endedAt = time()
-    if isTrackableInstanceType(current.type) then
+    if isTrackableInstanceRecord(current) then
         state.instance.previous = current
         addHistoryRecord(current)
     end
@@ -648,11 +720,13 @@ local function finishCurrentInstance()
 end
 
 local function startInstance(context)
+    state.instance.contextRecoveryUntil = 0
     state.instance.current = {
         id = allocateHistoryId(),
         key = context.key,
         name = context.name,
         type = context.type,
+        mapID = context.mapID,
         startTime = getActiveTime(),
         endTime = nil,
         totalXP = 0,
@@ -671,11 +745,16 @@ local function refreshInstanceContext()
 
     if not context then
         if current then
+            local recoveryUntil = floor(tonumber(state.instance.contextRecoveryUntil) or 0)
+            if recoveryUntil > 0 and time() < recoveryUntil then
+                return
+            end
             finishCurrentInstance()
         end
         return
     end
 
+    state.instance.contextRecoveryUntil = 0
     if not current then
         startInstance(context)
         return
@@ -685,6 +764,11 @@ local function refreshInstanceContext()
         finishCurrentInstance()
         startInstance(context)
         return
+    end
+
+    if current.mapID ~= context.mapID then
+        current.mapID = context.mapID
+        persistInstanceData()
     end
 
     local xpEnabledNow = canPlayerGainXPNow()
@@ -726,6 +810,7 @@ local function cloneInstanceRecord(record)
     local totalXP = max(0, floor(tonumber(record.totalXP) or 0))
     local totalReputation = floor(tonumber(record.totalReputation) or 0)
     local id = tonumber(record.id)
+    local mapID = floor(tonumber(record.mapID) or 0)
     local startedAt = tonumber(record.startedAt)
     local endedAt = tonumber(record.endedAt)
     local xpEnabled = record.xpEnabled
@@ -738,6 +823,7 @@ local function cloneInstanceRecord(record)
         key = tostring(record.key or ""),
         name = name,
         type = tostring(record.type or ""),
+        mapID = mapID > 0 and mapID or nil,
         startTime = startTime,
         endTime = endTime,
         totalXP = totalXP,
@@ -791,7 +877,7 @@ addHistoryRecord = function(record)
     if not copy or not copy.endTime then
         return
     end
-    if not isTrackableInstanceType(copy.type) then
+    if not isTrackableInstanceRecord(copy) then
         return
     end
 
@@ -837,10 +923,10 @@ local function restoreInstanceData()
 
     state.instance.current = cloneInstanceRecord(db.instanceData.current)
     state.instance.previous = cloneInstanceRecord(db.instanceData.previous)
-    if state.instance.current and not isTrackableInstanceType(state.instance.current.type) then
+    if state.instance.current and not isTrackableInstanceRecord(state.instance.current) then
         state.instance.current = nil
     end
-    if state.instance.previous and not isTrackableInstanceType(state.instance.previous.type) then
+    if state.instance.previous and not isTrackableInstanceRecord(state.instance.previous) then
         state.instance.previous = nil
     end
     if isSameInstanceRun(state.instance.current, state.instance.previous) then
@@ -856,13 +942,13 @@ local function migrateLegacyInstanceHistory()
     ensureHistoryStorage()
 
     if state.instance.current then
-        if not isTrackableInstanceType(state.instance.current.type) then
+        if not isTrackableInstanceRecord(state.instance.current) then
             state.instance.current = nil
         end
     end
 
     if state.instance.previous then
-        if not isTrackableInstanceType(state.instance.previous.type) then
+        if not isTrackableInstanceRecord(state.instance.previous) then
             state.instance.previous = nil
         end
     end
@@ -1090,7 +1176,7 @@ local function buildHistoryGroups()
     if db and type(db.instanceHistory) == "table" then
         for i = 1, #db.instanceHistory do
             local copy = cloneInstanceRecord(db.instanceHistory[i])
-            if copy and copy.endTime and isTrackableInstanceType(copy.type) then
+            if copy and copy.endTime and isTrackableInstanceRecord(copy) then
                 tinsert(entries, copy)
             end
         end
@@ -1934,6 +2020,12 @@ local function resetSession(preserveInstanceData)
     if not preserveInstanceData then
         state.instance.current = nil
         state.instance.previous = nil
+        state.instance.contextRecoveryUntil = 0
+    elseif state.instance.current then
+        -- On login/reload, instance APIs can briefly report no context even while still inside.
+        state.instance.contextRecoveryUntil = time() + INSTANCE_CONTEXT_RECOVERY_GRACE_SECONDS
+    else
+        state.instance.contextRecoveryUntil = 0
     end
     state.initialized = true
 

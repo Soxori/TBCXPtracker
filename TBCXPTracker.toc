@@ -2,7 +2,7 @@
 ## Title: TBC XP Tracker
 ## Notes: Tracks XP gained and estimates XP per hour.
 ## Author: Soxori
-## Version: 1.0.1
+## Version: 1.0.2
 ## SavedVariables: TBCXPTrackerDB
 
 TBCXPTracker.lua
